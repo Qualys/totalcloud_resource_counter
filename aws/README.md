@@ -83,7 +83,7 @@ Follow these steps to get started with AWS Resource Counter:
 ### Installation
 1. Clone the repository to your local machine:
    ```shell
-   git clone Qualys/totalcloud_resource_counter.git
+   git clone https://github.com/Qualys/totalcloud_resource_counter.git
 2. Change to the project directory:
    ```shell
    cd totalcloud_resource_counter/aws
