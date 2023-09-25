@@ -1,0 +1,9 @@
+azure-identity
+azure-mgmt-compute
+azure-mgmt-resource
+azure-mgmt-subscription
+azure-mgmt-web
+azure-mgmt-containerinstance
+azure-mgmt-containerservice
+azure-mgmt-containerregistry
+tqdm
