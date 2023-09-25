@@ -47,7 +47,7 @@ Before running the script, ensure you have the following:
 1. Clone this repository to your local machine:
 
    ```bash
-  https://github.com/yjhunjhun/resource-counter.git
+  git clone https://github.com/Qualys/totalcloud_resource_counter.git
 
 2. Navigate to the project directory:
    ```bash
