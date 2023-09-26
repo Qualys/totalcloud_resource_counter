@@ -6,11 +6,11 @@ This Python script is a command-line tool for counting various Google Cloud Plat
 
 ## Features
 
-- Lists GCP projects under an organization and its child folders recursively.
-- Counts running compute instances, Cloud Functions, GKE clusters, Artifact Registry repositories, and Artifact Registry Docker images in each project.
-- Saves the resource counts to CSV files for further analysis.
-- Provides progress bars during resource counting.
-- Logs informational and error messages.
+- **Count GCP Resources**: This script allows you to count various Google Cloud Platform (GCP) resources, including Compute Engine instances, Cloud Functions, Google Kubernetes Engine (GKE) clusters, Artifacts Repositories, and Docker Images.
+- **Run for Projects or Organizations**: You can choose to run the script for a single GCP project or for an entire organization. It provides flexibility for resource counting.
+- **Concurrent Processing**: The script uses multithreading to process resources concurrently, which can significantly reduce the execution time, especially for organizations with many projects.
+- **Detailed Output**: The script provides detailed information about the resources being counted, including the count of running compute instances, Cloud Functions, GKE clusters, Artifacts Repositories, and Docker Images.
+- **Output in CSV**: The script generates CSV files containing resource counts, making it easy to analyze and share the results.
 
 ## Prerequisites
 
@@ -41,44 +41,52 @@ Before running the script, ensure you have the following:
   - `roles/browser` for viewing organizations and folders in GCP.
   - `roles/resourcemanager.folderViewer` for viewing folders and projects within the organization.
   - Ensure the service account has at least read access to the GCP resources you want to count.
+- **Enable APIs**: Make sure that the following GCP APIs are enabled for your project:
+   - Compute Engine API
+   - Cloud Functions API
+   - Kubernetes Engine API
+   - Artifact Registry API
 
 ## Getting Started
 
 1. Clone this repository to your local machine:
-
-   ```bash
-  git clone https://github.com/Qualys/totalcloud_resource_counter.git
-
+   ```sh
+   git clone https://github.com/Qualys/totalcloud_resource_counter.git
+  
 2. Navigate to the project directory:
-   ```bash
+   ```shell
    cd resource-counter/gcp
 
-3. Navigate to the project directory:
-   ```bash
-   pip3 install -r requirements.txt
+3. Install dependencies in a virtual environment (recommended):
+   ```shell
+   python -m venv venv
+   source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+   pip install -r requirements.txt
 
 4. To count AWS resources, run the script and follow the prompts.
    ```shell
    python3 gcp-resource-counter.py
 
 5. Choose an option to run the script:
-  Option 1: Run for an entire organization
+   
+- Option 1: Run for an entire organization
     - Enter your organization ID when prompted.
     - Provide the path to your service account key JSON file when prompted.
-  Option 2: Run for a single project
+
+- Option 2: Run for a single project
     - Enter the path to your service account key JSON file for the specific GCP project.
     - Follow the prompts and let the script run.
   
 ## Output
-The script generates CSV files:
- - organization_resource_counts.csv (when running for an organization)
- - project_resource_counts.csv (when running for a single project)
+The script will generate output in the following ways:
+
+***Console Output:*** You will see detailed information about the resources being counted displayed in your terminal as the script runs.
+
+***CSV Files:*** The script will create CSV files containing resource counts. The file names are as follows:
+
+- When running the script for a single project: ***project_resource_counts.csv***
+- When running the script for an organization: ***gcp_resource_counts.csv***
+These CSV files will be located in the project directory.
 
 ## Logging
 Log messages are saved to gcp_resource_counter.log.
-
-### Contributing
-1. Fork the repository.
-2. Create a new branch for your feature or bug fix.
-3. Make your changes and commit them.
-4. Create a pull request with a clear description of your changes.
