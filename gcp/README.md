@@ -88,5 +88,14 @@ The script will generate output in the following ways:
 - When running the script for an organization: ***gcp_resource_counts.csv***
 These CSV files will be located in the project directory.
 
+
 ## Logging
-Log messages are saved to gcp_resource_counter.log.
+
+Logging is an essential part of this script, providing detailed information about its execution and any encountered errors. Here's how logging is configured and used:
+
+- **Logging Configuration**: Logging is configured using the Python `logging` module. Logs are saved to separate log file:
+  - `gcp_resource_counter.log`: Contains general information and execution logs.
+
+- **Log Levels**: Different log levels are used to categorize log messages:
+  - `INFO`: Informational messages about the progress of the script.
+  - `ERROR`: Error messages for exceptions and issues during execution.
