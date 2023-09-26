@@ -80,9 +80,43 @@ def count_resources_in_region(account_session, region_name):
         'ecs_fargate_tasks': count_ecs_fargate_tasks_in_region(account_session, region_name),
         'eks_instances': count_eks_instances_in_region(account_session, region_name),
         'ecr_repositories': count_ecr_repositories_in_region(account_session, region_name),
-        'ecr_images': count_ecr_images_in_region(account_session, region_name)
+        'ecr_images': count_ecr_images_in_region(account_session, region_name),
+        'eks_nodes': count_eks_nodes_in_region(account_session, region_name),  # Add EKS node counting
     }
     return counts
+
+# Add a new function to count EKS nodes in a region
+def count_eks_nodes_in_region(account_session, region_name):
+    """
+    Count EKS nodes in a specific region, including nodes within nodegroups.
+
+    Args:
+        account_session (boto3.Session): Session for the AWS account.
+        region_name (str): AWS region name.
+
+    Returns:
+        int: Count of EKS nodes.
+    """
+    try:
+        eks_client = account_session.client('eks', region_name=region_name)
+        response = eks_client.list_clusters()
+
+        eks_node_count = 0
+
+        for cluster_name in response.get('clusters', []):
+            # Describe the cluster to get details, including nodegroups
+            cluster_details = eks_client.describe_cluster(name=cluster_name)
+
+            # Count nodes in the default nodegroup
+            eks_node_count += cluster_details['cluster']['status']['resourcesVpcConfig']['subnetIds']
+
+            # Count nodes in each nodegroup
+            for nodegroup in cluster_details['cluster']['nodeGroups']:
+                eks_node_count += nodegroup['count']
+
+        return eks_node_count
+    except Exception as e:
+        return 0
 
 def count_running_ec2_instances_in_region(account_session, region_name):
     """
@@ -174,9 +208,10 @@ def count_eks_instances_in_region(account_session, region_name):
     except Exception as e:
         return 0
 
+
 def count_ecr_repositories_in_region(account_session, region_name):
     """
-    Count ECR repositories in a specific region.
+    Count ECR repositories in a specific region with pagination support.
 
     Args:
         account_session (boto3.Session): Session for the AWS account.
@@ -187,12 +222,18 @@ def count_ecr_repositories_in_region(account_session, region_name):
     """
     try:
         ecr_client = account_session.client('ecr', region_name=region_name)
-        response = ecr_client.describe_repositories()
 
-        ecr_repository_count = len(response.get('repositories', []))
-        return ecr_repository_count
+        repository_count = 0
+        paginator = ecr_client.get_paginator('describe_repositories')
+
+        for page in paginator.paginate():
+            repositories = page.get('repositories', [])
+            repository_count += len(repositories)
+
+        return repository_count
     except Exception as e:
         return 0
+
 
 def count_ecr_images_in_region(account_session, region_name):
     """
@@ -284,6 +325,7 @@ def count_resources(input_type, management_access_key, management_secret_key):
         total_eks_instance_count = 0
         total_ecr_repository_count = 0
         total_ecr_image_count = 0
+        total_eks_node_count = 0  # Initialize EKS node count
 
         # Iterate over active regions and count resources concurrently
         with ThreadPoolExecutor(max_workers=30) as executor:
@@ -301,6 +343,7 @@ def count_resources(input_type, management_access_key, management_secret_key):
             total_eks_instance_count += counts['eks_instances']
             total_ecr_repository_count += counts['ecr_repositories']
             total_ecr_image_count += counts['ecr_images']
+            total_eks_node_count += counts['eks_nodes']  # Add EKS node count
 
         # Print the total counts for the management account
         logging.info(f"  Management Account {management_account_id} Resource Counts:")
@@ -309,7 +352,8 @@ def count_resources(input_type, management_access_key, management_secret_key):
         logging.info(f"  Total ECS Fargate Tasks: {total_ecs_fargate_task_count}")
         logging.info(f"  Total EKS Instances: {total_eks_instance_count}")
         logging.info(f"  Total ECR Repositories: {total_ecr_repository_count}")
-        logging.info(f"  Total ECR Images: {total_ecr_image_count}\n")
+        logging.info(f"  Total ECR Images: {total_ecr_image_count}")
+        logging.info(f"  Total EKS Nodes: {total_eks_node_count}\n")  # Log EKS node count
 
         # Append the results to the list
         results.append([
@@ -319,7 +363,8 @@ def count_resources(input_type, management_access_key, management_secret_key):
             total_ecs_fargate_task_count,
             total_eks_instance_count,
             total_ecr_repository_count,
-            total_ecr_image_count
+            total_ecr_image_count,
+            total_eks_node_count  # Add EKS node count
         ])
 
         # Append the results to the CSV file immediately
@@ -369,6 +414,7 @@ def count_resources(input_type, management_access_key, management_secret_key):
             total_eks_instance_count = 0
             total_ecr_repository_count = 0
             total_ecr_image_count = 0
+            total_eks_node_count = 0  # Initialize EKS node count
 
             # Iterate over active regions and count resources concurrently
             with ThreadPoolExecutor(max_workers=30) as executor:
@@ -386,6 +432,7 @@ def count_resources(input_type, management_access_key, management_secret_key):
                 total_eks_instance_count += counts['eks_instances']
                 total_ecr_repository_count += counts['ecr_repositories']
                 total_ecr_image_count += counts['ecr_images']
+                total_eks_node_count += counts['eks_nodes']  # Add EKS node count
 
             # Print the total counts for all regions in the member account
             logging.info(f"Member Account {member_account_id} Resource Counts:")
@@ -394,7 +441,8 @@ def count_resources(input_type, management_access_key, management_secret_key):
             logging.info(f"  Total ECS Fargate Tasks: {total_ecs_fargate_task_count}")
             logging.info(f"  Total EKS Instances: {total_eks_instance_count}")
             logging.info(f"  Total ECR Repositories: {total_ecr_repository_count}")
-            logging.info(f"  Total ECR Images: {total_ecr_image_count}\n")
+            logging.info(f"  Total ECR Images: {total_ecr_image_count}")
+            logging.info(f"  Total EKS Nodes: {total_eks_node_count}\n")  # Log EKS node count
 
             # Append the results to the list
             results.append([
@@ -404,7 +452,8 @@ def count_resources(input_type, management_access_key, management_secret_key):
                 total_ecs_fargate_task_count,
                 total_eks_instance_count,
                 total_ecr_repository_count,
-                total_ecr_image_count
+                total_ecr_image_count,
+                total_eks_node_count  # Add EKS node count
             ])
 
             # Append the results to the CSV file immediately
@@ -445,6 +494,7 @@ def count_resources(input_type, management_access_key, management_secret_key):
         total_eks_instance_count = 0
         total_ecr_repository_count = 0
         total_ecr_image_count = 0
+        total_eks_node_count = 0  # Initialize EKS node count
 
         # Iterate over active regions and count resources concurrently
         with ThreadPoolExecutor(max_workers=30) as executor:
@@ -462,69 +512,63 @@ def count_resources(input_type, management_access_key, management_secret_key):
             total_eks_instance_count += counts['eks_instances']
             total_ecr_repository_count += counts['ecr_repositories']
             total_ecr_image_count += counts['ecr_images']
+            total_eks_node_count += counts['eks_nodes']  # Add EKS node count
 
-        # Create the CSV file if it doesn't exist and write the header row
-        with open(csv_file_name, 'w', newline='') as csv_file:
-            csv_writer = csv.writer(csv_file)
-
-            # Write the header row
-            csv_writer.writerow([
-                "Account ID",
-                "Total Running EC2 Instances",
-                "Total Lambda Functions",
-                "Total ECS Fargate Tasks",
-                "Total EKS Instances",
-                "Total ECR Repositories",
-                "Total ECR Images"
-            ])
-
-        # Print the total counts for the account
+        # Print the total counts for all regions in the account
         logging.info(f"Account {account_id} Resource Counts:")
         logging.info(f"  Total Running EC2 Instances: {total_running_ec2_instances}")
         logging.info(f"  Total Lambda Functions: {total_lambda_function_count}")
         logging.info(f"  Total ECS Fargate Tasks: {total_ecs_fargate_task_count}")
         logging.info(f"  Total EKS Instances: {total_eks_instance_count}")
         logging.info(f"  Total ECR Repositories: {total_ecr_repository_count}")
-        logging.info(f"  Total ECR Images: {total_ecr_image_count}\n")
+        logging.info(f"  Total ECR Images: {total_ecr_image_count}")
+        logging.info(f"  Total EKS Nodes: {total_eks_node_count}")  # Log EKS node count
 
-        # Append the results to the CSV file immediately
-        with open(csv_file_name, 'w', newline='') as csv_file:
+        # Append the results to the CSV file
+        with open(csv_file_name, 'a', newline='') as csv_file:
             csv_writer = csv.writer(csv_file)
 
-            # Write the header row
-            csv_writer.writerow([
-                "Account ID",
-                "Total Running EC2 Instances",
-                "Total Lambda Functions",
-                "Total ECS Fargate Tasks",
-                "Total EKS Instances",
-                "Total ECR Repositories",
-                "Total ECR Images"
-            ])
-
             # Write the data rows to the CSV file
-            csv_writer.writerows([[
+            csv_writer.writerow([
                 account_id,
                 total_running_ec2_instances,
                 total_lambda_function_count,
                 total_ecs_fargate_task_count,
                 total_eks_instance_count,
                 total_ecr_repository_count,
-                total_ecr_image_count
-            ]])
+                total_ecr_image_count,
+                total_eks_node_count  # Add EKS node count
+            ])
 
         logging.info(f"Results added to {csv_file_name}")
 
 if __name__ == "__main__":
-    # Take user input for the type of resource counting (org or account)
-    input_type = input("Select resource counting type (org/account): ").lower()
+    # Input type: 'org' for organization-level resource counting or 'account' for account-level counting
+    input_type = input("Enter 'org' for organization-level resource counting or 'account' for account-level counting: ")
 
-    if input_type not in ['org', 'account']:
-        logging.error("Invalid input. Please select 'org' or 'account' as the counting type.")
+    if input_type not in ('org', 'account'):
+        logging.error("Invalid input. Please enter 'org' or 'account'.")
         exit()
 
-    # Take user input for Management Account credentials
-    management_access_key = input("Enter Account Access Key: ")
-    management_secret_key = input("Enter Account Secret Key: ")
+    # Management account access key and secret key
+    management_access_key = input("Enter the access key for the account: ")
+    management_secret_key = input("Enter the secret key for the account: ")
 
+    # Initialize the CSV file with headers
+    with open(csv_file_name, 'w', newline='') as csv_file:
+        csv_writer = csv.writer(csv_file)
+
+        # Write the header row to the CSV file
+        csv_writer.writerow([
+            'Account ID',
+            'Running EC2 Instances',
+            'Lambda Functions',
+            'ECS Fargate Tasks',
+            'EKS Instances',
+            'ECR Repositories',
+            'ECR Images',
+            'EKS Nodes'  # Add EKS node count
+        ])
+
+    # Count AWS resources based on the input type
     count_resources(input_type, management_access_key, management_secret_key)
