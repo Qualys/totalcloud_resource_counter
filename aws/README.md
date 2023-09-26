@@ -87,9 +87,11 @@ Follow these steps to get started with AWS Resource Counter:
 2. Change to the project directory:
    ```shell
    cd totalcloud_resource_counter/aws
-3. Install the required Python packages using pip:
-   ```shell 
-   pip3 install -r requirements.txt
+3. Install dependencies in a virtual environment (recommended):
+   ```shell
+   python -m venv venv
+   source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+   pip install -r requirements.txt
 4. To count AWS resources, run the script and follow the prompts.
    ```shell
    python3 aws-resource-counter.py
