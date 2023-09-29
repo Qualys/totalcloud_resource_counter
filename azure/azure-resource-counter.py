@@ -239,35 +239,37 @@ def main():
 
     # Create or append to the CSV file
     csv_exists = os.path.exists(CSV_FILE_PATH)
-    with open(CSV_FILE_PATH, mode='a', newline='') as csv_file:
-        csv_writer = csv.writer(csv_file)
+    if csv_exists:
+        os.remove(CSV_FILE_PATH)
+        with open(CSV_FILE_PATH, mode='a', newline='') as csv_file:
+            csv_writer = csv.writer(csv_file)
 
         # Write header row if the CSV file is newly created
-        if not csv_exists:
-            csv_writer.writerow(['Subscription ID', 'Virtual Machines', 'Web Apps', 'Container Instances', 'AKS Clusters',
+            if csv_exists:
+                csv_writer.writerow(['Subscription ID', 'Virtual Machines', 'Web Apps', 'Container Instances', 'AKS Clusters',
                                  'ACR Registries', 'ACR Images', 'Azure Functions'])
 
-        # Prompt the user to select the option
-        print("Select an option:")
-        print("1. Process all subscriptions")
-        print("2. Process a single subscription")
-        option = input("Enter your choice (1/2): ")
+            # Prompt the user to select the option
+            print("Select an option:")
+            print("1. Process all subscriptions")
+            print("2. Process a single subscription")
+            option = input("Enter your choice (1/2): ")
 
-        if option == "1":
-            # Process all subscriptions
-            pbar = tqdm(subscriptions, desc="Processing Subscriptions", unit="subscription")
-            for subscription in pbar:
-                process_subscription(credential, subscription, csv_writer)
-        elif option == "2":
-            # Process a single subscription
-            subscription_id = input("Enter the Subscription ID to process: ")
-            subscription = next((sub for sub in subscriptions if sub.subscription_id == subscription_id), None)
-            if subscription:
-                process_subscription(credential, subscription, csv_writer)
+            if option == "1":
+                # Process all subscriptions
+                pbar = tqdm(subscriptions, desc="Processing Subscriptions", unit="subscription")
+                for subscription in pbar:
+                    process_subscription(credential, subscription, csv_writer)
+            elif option == "2":
+                # Process a single subscription
+                subscription_id = input("Enter the Subscription ID to process: ")
+                subscription = next((sub for sub in subscriptions if sub.subscription_id == subscription_id), None)
+                if subscription:
+                    process_subscription(credential, subscription, csv_writer)
+                else:
+                    print("Subscription not found.")
             else:
-                print("Subscription not found.")
-        else:
-            print("Invalid option. Please select 1 or 2.")
+                print("Invalid option. Please select 1 or 2.")
 
 if __name__ == "__main__":
     main()
