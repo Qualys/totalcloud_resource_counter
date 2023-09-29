@@ -110,7 +110,7 @@ def count_gke_clusters(service, project_id, credentials):
         error_message = f"An error occurred while counting GKE clusters in project {project_id}: {str(e)}"
         logging.error(error_message)
         return 0
-# Function to count Artifacts Repositories and Docker Images in a project
+# Function to count Artifacts Repositories and Container Images in a project
 def count_artifacts_and_docker_images(service, project_id):
     try:
         # Build the Artifact Registry client
@@ -128,7 +128,7 @@ def count_artifacts_and_docker_images(service, project_id):
         total_repository_count = 0
         total_docker_image_count = 0
 
-        # Iterate through locations and count repositories and Docker Images
+        # Iterate through locations and count repositories and Container Images
         for location in locations:
             # List repositories in each location
             repositories_list = artifact_registry_service.projects().locations().repositories().list(
@@ -138,14 +138,14 @@ def count_artifacts_and_docker_images(service, project_id):
             # Get the count of repositories in each location
             repository_count = len(repositories_list.get('repositories', []))
 
-            # List Docker images in each repository
+            # List Container Images in each repository
             for repository in repositories_list.get('repositories', []):
                 repository_name = repository['name']
                 docker_images_list = artifact_registry_service.projects().locations().repositories().dockerImages().list(
                     parent=f'{repository_name}'
                 ).execute()
 
-                # Get the count of Docker images in each repository
+                # Get the count of Container Images in each repository
                 docker_image_count = len(docker_images_list.get('dockerImages', []))
 
                 total_repository_count += 1
@@ -154,7 +154,7 @@ def count_artifacts_and_docker_images(service, project_id):
         return total_repository_count, total_docker_image_count
 
     except HttpError as e:
-        error_message = f"An error occurred while counting Artifacts Repositories and Docker Images in project {project_id}: {str(e)}"
+        error_message = f"An error occurred while counting Artifacts Repositories and Container Images in project {project_id}: {str(e)}"
         logging.error(error_message)
         return 0, 0
 
@@ -178,27 +178,19 @@ def process_resources(credentials, project_id):
                          f'Cloud Functions: {functions_count}, ' \
                          f'GKE Clusters: {gke_clusters_count}, ' \
                          f'Artifacts Repositories: {repository_count}, ' \
-                         f'Docker Images: {docker_image_count}'
+                         f'Container Images: {docker_image_count}'
 
         # Print the total counts for project
         logging.info(f"  Project ID {project_id} Resource Counts:")
         logging.info(f"  Running Compute Instances: {instances_count}")
         logging.info(f"  Cloud Functions: {functions_count}")
         logging.info(f"  GKE Clusters: {gke_clusters_count}")
-        logging.info(f"  Docker Images: {docker_image_count}")
+        logging.info(f"  Container Images: {docker_image_count}")
 
         # Create a CSV file to store the results
         csv_file = 'gcp_resource_counts.csv'
         script_directory = os.path.dirname(os.path.realpath(__file__))
         csv_file_path = os.path.join(script_directory, csv_file)
-        # Check if the CSV file already exists, if not, write the header row
-        if not os.path.isfile(csv_file_path):
-            with open(csv_file_path, 'w', newline='') as csv_file:
-                csv_writer = csv.writer(csv_file)
-                # Write the header row
-                csv_writer.writerow(
-                    ['Project ID', 'Running Compute Instances', 'Cloud Functions', 'GKE Clusters', 'Artifacts Repositories',
-                     'Docker Images'])
 
         # Append the project data to the CSV file
         with open(csv_file_path, 'a', newline='') as csv_file:
@@ -246,6 +238,20 @@ def run_for_organization(organization_id, service_account_key_file, credentials)
     info_message = f'Unique Project Count under Organization {organization_id}: {len(unique_project_ids)}'
     logging.info(info_message)
 
+    # Create a CSV file to store the results
+    csv_file = 'gcp_resource_counts.csv'
+    script_directory = os.path.dirname(os.path.realpath(__file__))
+    csv_file_path = os.path.join(script_directory, csv_file)
+    # Check if the CSV file already exists, if not, write the header row
+    if os.path.isfile(csv_file_path):
+        os.remove(csv_file_path)
+        with open(csv_file_path, 'w', newline='') as csv_file:
+            csv_writer = csv.writer(csv_file)
+            # Write the header row
+            csv_writer.writerow(
+                ['Project ID', 'Running Compute Instances', 'Cloud Functions', 'GKE Clusters', 'Artifacts Repositories',
+                 'Container Images'])
+
     # Create a thread pool to process resources concurrently for each project
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:  # Adjust max_workers as needed
         # Submit tasks for processing resources for each project
@@ -287,27 +293,28 @@ def run_for_project(credentials):
                      f'Cloud Functions: {functions_count}, ' \
                      f'GKE Clusters: {gke_clusters_count}, ' \
                      f'Artifacts Repositories: {repository_count}, ' \
-                     f'Docker Images: {docker_image_count}'
+                     f'Container Images: {docker_image_count}'
 
     # Print the total counts for project
     logging.info(f"  Project ID {project_id} Resource Counts:")
     logging.info(f"  Running Compute Instances: {instances_count}")
     logging.info(f"  Cloud Functions: {functions_count}")
     logging.info(f"  GKE Clusters: {gke_clusters_count}")
-    logging.info(f"  Docker Images: {docker_image_count}")
+    logging.info(f"  Container Images: {docker_image_count}")
 
     # Create a CSV file to store the results
     csv_file = 'project_resource_counts.csv'
     script_directory = os.path.dirname(os.path.realpath(__file__))
     csv_file_path = os.path.join(script_directory, csv_file)
     # Check if the CSV file already exists, if not, write the header row
-    if not os.path.isfile(csv_file_path):
+    if os.path.isfile(csv_file_path):
+        os.remove(csv_file_path)
         with open(csv_file_path, 'w', newline='') as csv_file:
             csv_writer = csv.writer(csv_file)
             # Write the header row
             csv_writer.writerow(
                 ['Project ID', 'Running Compute Instances', 'Cloud Functions', 'GKE Clusters', 'Artifacts Repositories',
-                 'Docker Images'])
+                 'Container Images'])
 
     # Append the project data to the CSV file
     with open(csv_file_path, 'a', newline='') as csv_file:
