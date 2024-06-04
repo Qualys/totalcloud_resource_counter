@@ -1,0 +1,5 @@
+Subscription ID,Virtual Machines,Web Apps,Container Instances,AKS Clusters,ACR Registries,ACR Images,Azure Functions
+5a85a387-XXXX-XXXX-XXXX-c4846979cb16,44,1,2,8,35,0,1
+19c33874-XXXX-XXXX-XXXX-5e0dc38f19ac,5,1,1,0,4,0,0
+9964e9f0-XXXX-XXXX-XXXX-e0325c8931c0,1,2,0,1,1,0,2
+30293558-XXXX-XXXX-XXXX-016e35462650,35,9,1,1,3,0,4
