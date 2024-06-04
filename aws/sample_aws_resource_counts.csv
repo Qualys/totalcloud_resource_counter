@@ -1,0 +1,16 @@
+Account ID,Running EC2 Instances,Lambda Functions,ECS Fargate Tasks,EKS Instances,ECR Repositories,ECR Images,EKS Nodes
+3932XXXXXX85,5,9,0,0,0,1111,0
+41260XXXX318,0,25,25,0,0,0,123
+617XXXXX6156,2,25,0,0,25,25,0
+51743XXXXX22,0,0,0,25,0,0,0
+4571XXXXX242,25,0,0,0,12,0,25
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
+,,,,,,,
