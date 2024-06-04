@@ -1,0 +1,5 @@
+Project ID,Running Compute Instances,Cloud Functions,GKE Clusters,Artifacts Repositories,Container Images
+arsh942-XXXX-dev,0,0,0,0,0
+arsh519-XXXX-dev,2,1,2,1,1
+arsh648-XXXX-dev,2,1,0,1,0
+arsh1317-XXXX-dev,0,122,2,2,0
