@@ -75,7 +75,7 @@ def count_resources_in_region(account_session, region_name):
         dict: Resource counts in the region.
     """
     counts = {
-        'running_ec2_instances': count_running_ec2_instances_in_region(account_session, region_name),
+        'running_ec2_instances': count_all_ec2_instances_in_region(account_session, region_name),
         'lambda_functions': count_lambda_functions_in_region(account_session, region_name),
         'ecs_fargate_tasks': count_ecs_fargate_tasks_in_region(account_session, region_name),
         'eks_instances': count_eks_instances_in_region(account_session, region_name),
@@ -86,62 +86,89 @@ def count_resources_in_region(account_session, region_name):
     return counts
 
 # Add a new function to count EKS nodes in a region
+import boto3
+
 def count_eks_nodes_in_region(account_session, region_name):
     """
-    Count EKS nodes in a specific region, including nodes within nodegroups.
+    Count unique EKS nodes in a specific region, including nodes within nodegroups.
 
     Args:
         account_session (boto3.Session): Session for the AWS account.
         region_name (str): AWS region name.
 
     Returns:
-        int: Count of EKS nodes.
+        int: Count of unique EKS nodes.
     """
     try:
         eks_client = account_session.client('eks', region_name=region_name)
-        response = eks_client.list_clusters()
+        unique_nodes = set()
 
-        eks_node_count = 0
+        # Use paginator to handle pagination for listing clusters
+        cluster_paginator = eks_client.get_paginator('list_clusters')
+        for cluster_page in cluster_paginator.paginate():
+            for cluster_name in cluster_page.get('clusters', []):
+                # List instances directly associated with the cluster's VPC
+                vpc_id = eks_client.describe_cluster(name=cluster_name)['cluster']['resourcesVpcConfig']['vpcId']
+                ec2_client = boto3.client('ec2', region_name=region_name)
+                instance_response = ec2_client.describe_instances(Filters=[
+                    {'Name': 'vpc-id', 'Values': [vpc_id]},
+                    {'Name': 'tag-key', 'Values': ['kubernetes.io/cluster/' + cluster_name]}
+                ])
+                for reservation in instance_response['Reservations']:
+                    for instance in reservation['Instances']:
+                        if instance['State']['Name'] == 'running':
+                            unique_nodes.add(instance['InstanceId'])  # Add instance ID to set of unique nodes
 
-        for cluster_name in response.get('clusters', []):
-            # Describe the cluster to get details, including nodegroups
-            cluster_details = eks_client.describe_cluster(name=cluster_name)
+                # Use paginator to handle pagination for listing nodegroups
+                nodegroup_paginator = eks_client.get_paginator('list_nodegroups')
+                for nodegroup_page in nodegroup_paginator.paginate(clusterName=cluster_name):
+                    for nodegroup_name in nodegroup_page.get('nodegroups', []):
+                        try:
+                            nodegroup_details = eks_client.describe_nodegroup(
+                                clusterName=cluster_name,
+                                nodegroupName=nodegroup_name
+                            )
+                            # Add instance IDs from nodegroup to set of unique nodes
+                            for instance in nodegroup_details['nodegroup'].get('instances', []):
+                                unique_nodes.add(instance['id'])
+                        except KeyError as e:
+                            print(f"KeyError occurred while processing nodegroup '{nodegroup_name}' in region {region_name}: {e}")
+                        except Exception as e:
+                            print(f"An error occurred while processing nodegroup '{nodegroup_name}' in region {region_name}: {e}")
 
-            # Count nodes in the default nodegroup
-            eks_node_count += cluster_details['cluster']['status']['resourcesVpcConfig']['subnetIds']
-
-            # Count nodes in each nodegroup
-            for nodegroup in cluster_details['cluster']['nodeGroups']:
-                eks_node_count += nodegroup['count']
-
-        return eks_node_count
+        return len(unique_nodes)
     except Exception as e:
+        print(f"An error occurred in region {region_name}: {e}")
         return 0
 
-def count_running_ec2_instances_in_region(account_session, region_name):
+def count_all_ec2_instances_in_region(account_session, region_name):
     """
-    Count running EC2 instances in a specific region.
+    Count all EC2 instances in a specific region.
 
     Args:
         account_session (boto3.Session): Session for the AWS account.
         region_name (str): AWS region name.
 
     Returns:
-        int: Count of running EC2 instances.
+        int: Count of all EC2 instances.
     """
     try:
         ec2_client = account_session.client('ec2', region_name=region_name)
 
+        total_ec2_instance_count = 0
         paginator = ec2_client.get_paginator('describe_instances')
-        running_ec2_instance_count = 0
 
-        for page in paginator.paginate(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]):
+        # Paginate through DescribeInstances API call
+        for page in paginator.paginate():
             for reservation in page['Reservations']:
-                running_ec2_instance_count += len(reservation['Instances'])
+                total_ec2_instance_count += len(reservation['Instances'])
 
-        return running_ec2_instance_count
+        return total_ec2_instance_count
+
     except Exception as e:
+        print(f"An error occurred in region {region_name}: {e}")
         return 0
+
 
 def count_lambda_functions_in_region(account_session, region_name):
     """
@@ -248,16 +275,19 @@ def count_ecr_images_in_region(account_session, region_name):
     """
     try:
         ecr_client = account_session.client('ecr', region_name=region_name)
-        response = ecr_client.describe_repositories()
+        paginator = ecr_client.get_paginator('describe_repositories')
 
         ecr_image_count = 0
 
-        for repository in response.get('repositories', []):
-            image_response = ecr_client.describe_images(repositoryName=repository['repositoryName'])
-            ecr_image_count += len(image_response.get('imageDetails', []))
+        for page in paginator.paginate():
+            for repository in page.get('repositories', []):
+                image_paginator = ecr_client.get_paginator('describe_images')
+                for image_page in image_paginator.paginate(repositoryName=repository['repositoryName']):
+                    ecr_image_count += len(image_page.get('imageDetails', []))
 
         return ecr_image_count
     except Exception as e:
+        print(f"An error occurred in region {region_name}: {e}")
         return 0
 
 def get_active_regions(account_session):
