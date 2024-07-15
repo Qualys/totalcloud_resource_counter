@@ -416,6 +416,8 @@ def count_resources(input_type, management_access_key, management_secret_key):
             for account in page['Accounts']:
                 member_account_ids.append(account['Id'])
 
+        member_account_ids.remove(management_account_id)
+
         # Loop through each member account
         for member_account_id in tqdm(member_account_ids, desc="Processing Member Accounts"):
             # Create a new session for each member account by assuming the role
