@@ -1,3 +1,4 @@
-boto3
-tqdm
-futures
+boto3 == 1.35.91
+botocore == 1.35.91
+tqdm == 4.67.1
+futures == 3.0.5
