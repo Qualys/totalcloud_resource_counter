@@ -1,604 +1,538 @@
+#!/usr/bin/env python3
+
 import boto3
-from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
 import csv
 import logging
+import time
+import random
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from typing import Dict, Any, List, Optional
 
-# Configure logging to write to a file
-log_file_name = "aws_resource_count.log"
-logging.basicConfig(filename=log_file_name, level=logging.INFO, format='%(levelname)s: %(message)s')
+from botocore.config import Config
+from tqdm import tqdm
 
-# Define the CSV file name
-csv_file_name = "aws_resource_counts.csv"
+# =========================
+# Global Settings
+# =========================
 
-def get_management_account_id(management_session):
-    """
-    Get the AWS account ID of the management account in the organization.
+LOG_FILE = "aws_resource_count.log"
+CSV_FILE = "aws_resource_counts.csv"
+ASSUME_ROLE_NAME = "OrganizationAccountAccessRole"
 
-    Args:
-        management_session (boto3.Session): Session for the management account.
+MAX_ACCOUNT_WORKERS = 32   # processes (accounts in parallel)
+MAX_REGION_WORKERS = 10    # threads per account (regions in parallel)
 
-    Returns:
-        str: AWS account ID of the management account.
-    """
-    org_client = management_session.client('organizations')
-    try:
-        response = org_client.describe_organization()
-        return response['Organization']['MasterAccountId']
-    except Exception as e:
-        logging.error(f"Error getting management account ID: {e}")
-        return None
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-def assume_role_and_get_session(account_id, role_name, session_name, management_session):
-    """
-    Assume a role in a member account and return a session.
-
-    Args:
-        account_id (str): AWS account ID.
-        role_name (str): Name of the IAM role to assume.
-        session_name (str): Name for the assumed session.
-        management_session (boto3.Session): Session for the management account.
-
-    Returns:
-        boto3.Session: Session for the assumed role.
-        Exception: Error encountered during the role assumption, if any.
-    """
-    sts_client = management_session.client('sts')
-    role_arn = f'arn:aws:iam::{account_id}:role/{role_name}'
-
-    try:
-        response = sts_client.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name
-        )
-
-        # Create a session using temporary credentials
-        member_session = boto3.Session(
-            aws_access_key_id=response['Credentials']['AccessKeyId'],
-            aws_secret_access_key=response['Credentials']['SecretAccessKey'],
-            aws_session_token=response['Credentials']['SessionToken']
-        )
-
-        return member_session, None
-    except Exception as e:
-        return None, e
-
-def count_resources_in_region(account_session, region_name):
-    """
-    Count resources concurrently in a specific region.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        dict: Resource counts in the region.
-    """
-    counts = {
-        'running_ec2_instances': count_all_ec2_instances_in_region(account_session, region_name),
-        'lambda_functions': count_lambda_functions_in_region(account_session, region_name),
-        'ecs_fargate_tasks': count_ecs_fargate_tasks_in_region(account_session, region_name),
-        'eks_instances': count_eks_instances_in_region(account_session, region_name),
-        'ecr_repositories': count_ecr_repositories_in_region(account_session, region_name),
-        'ecr_images': count_ecr_images_in_region(account_session, region_name),
-        'eks_nodes': count_eks_nodes_in_region(account_session, region_name),  # Add EKS node counting
-    }
-    return counts
-
-# Add a new function to count EKS nodes in a region
-import boto3
-
-def count_eks_nodes_in_region(account_session, region_name):
-    """
-    Count unique EKS nodes in a specific region, including nodes within nodegroups.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of unique EKS nodes.
-    """
-    try:
-        eks_client = account_session.client('eks', region_name=region_name)
-        unique_nodes = set()
-
-        # Use paginator to handle pagination for listing clusters
-        cluster_paginator = eks_client.get_paginator('list_clusters')
-        for cluster_page in cluster_paginator.paginate():
-            for cluster_name in cluster_page.get('clusters', []):
-                # List instances directly associated with the cluster's VPC
-                vpc_id = eks_client.describe_cluster(name=cluster_name)['cluster']['resourcesVpcConfig']['vpcId']
-                ec2_client = boto3.client('ec2', region_name=region_name)
-                instance_response = ec2_client.describe_instances(Filters=[
-                    {'Name': 'vpc-id', 'Values': [vpc_id]},
-                    {'Name': 'tag-key', 'Values': ['kubernetes.io/cluster/' + cluster_name]}
-                ])
-                for reservation in instance_response['Reservations']:
-                    for instance in reservation['Instances']:
-                        if instance['State']['Name'] == 'running':
-                            unique_nodes.add(instance['InstanceId'])  # Add instance ID to set of unique nodes
-
-                # Use paginator to handle pagination for listing nodegroups
-                nodegroup_paginator = eks_client.get_paginator('list_nodegroups')
-                for nodegroup_page in nodegroup_paginator.paginate(clusterName=cluster_name):
-                    for nodegroup_name in nodegroup_page.get('nodegroups', []):
-                        try:
-                            nodegroup_details = eks_client.describe_nodegroup(
-                                clusterName=cluster_name,
-                                nodegroupName=nodegroup_name
-                            )
-                            # Add instance IDs from nodegroup to set of unique nodes
-                            for instance in nodegroup_details['nodegroup'].get('instances', []):
-                                unique_nodes.add(instance['id'])
-                        except KeyError as e:
-                            print(f"KeyError occurred while processing nodegroup '{nodegroup_name}' in region {region_name}: {e}")
-                        except Exception as e:
-                            print(f"An error occurred while processing nodegroup '{nodegroup_name}' in region {region_name}: {e}")
-
-        return len(unique_nodes)
-    except Exception as e:
-        print(f"An error occurred in region {region_name}: {e}")
-        return 0
-
-def count_all_ec2_instances_in_region(account_session, region_name):
-    """
-    Count all EC2 instances in a specific region.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of all EC2 instances.
-    """
-    try:
-        ec2_client = account_session.client('ec2', region_name=region_name)
-
-        total_ec2_instance_count = 0
-        paginator = ec2_client.get_paginator('describe_instances')
-
-        # Paginate through DescribeInstances API call
-        for page in paginator.paginate():
-            for reservation in page['Reservations']:
-                total_ec2_instance_count += len(reservation['Instances'])
-
-        return total_ec2_instance_count
-
-    except Exception as e:
-        print(f"An error occurred in region {region_name}: {e}")
-        return 0
+boto_config = Config(
+    retries={"max_attempts": 10, "mode": "standard"},
+    connect_timeout=5,
+    read_timeout=60,
+)
 
 
-def count_lambda_functions_in_region(account_session, region_name):
-    """
-    Count Lambda functions in a specific region.
+# =========================
+# Basic Session / STS Helpers
+# =========================
 
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of Lambda functions.
-    """
-    try:
-        lambda_client = account_session.client('lambda', region_name=region_name)
-        response = lambda_client.list_functions()
-
-        lambda_function_count = len(response.get('Functions', []))
-        return lambda_function_count
-    except Exception as e:
-        return 0
-
-def count_ecs_fargate_tasks_in_region(account_session, region_name):
-    """
-    Count ECS Fargate tasks in a specific region.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of ECS Fargate tasks.
-    """
-    try:
-        ecs_client = account_session.client('ecs', region_name=region_name)
-        response = ecs_client.list_clusters()
-
-        ecs_fargate_task_count = 0
-
-        for cluster_arn in response.get('clusterArns', []):
-            tasks_response = ecs_client.list_tasks(cluster=cluster_arn)
-            ecs_fargate_task_count += len(tasks_response.get('taskArns', []))
-
-        return ecs_fargate_task_count
-    except Exception as e:
-        return 0
-
-def count_eks_instances_in_region(account_session, region_name):
-    """
-    Count EKS instances in a specific region.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of EKS instances.
-    """
-    try:
-        eks_client = account_session.client('eks', region_name=region_name)
-        response = eks_client.list_clusters()
-
-        eks_instance_count = len(response.get('clusters', []))
-        return eks_instance_count
-    except Exception as e:
-        return 0
-
-
-def count_ecr_repositories_in_region(account_session, region_name):
-    """
-    Count ECR repositories in a specific region with pagination support.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of ECR repositories.
-    """
-    try:
-        ecr_client = account_session.client('ecr', region_name=region_name)
-
-        repository_count = 0
-        paginator = ecr_client.get_paginator('describe_repositories')
-
-        for page in paginator.paginate():
-            repositories = page.get('repositories', [])
-            repository_count += len(repositories)
-
-        return repository_count
-    except Exception as e:
-        return 0
-
-
-def count_ecr_images_in_region(account_session, region_name):
-    """
-    Count ECR images in a specific region.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-        region_name (str): AWS region name.
-
-    Returns:
-        int: Count of ECR images.
-    """
-    try:
-        ecr_client = account_session.client('ecr', region_name=region_name)
-        paginator = ecr_client.get_paginator('describe_repositories')
-
-        ecr_image_count = 0
-
-        for page in paginator.paginate():
-            for repository in page.get('repositories', []):
-                image_paginator = ecr_client.get_paginator('describe_images')
-                for image_page in image_paginator.paginate(repositoryName=repository['repositoryName']):
-                    ecr_image_count += len(image_page.get('imageDetails', []))
-
-        return ecr_image_count
-    except Exception as e:
-        print(f"An error occurred in region {region_name}: {e}")
-        return 0
-
-def get_active_regions(account_session):
-    """
-    Get the list of active regions for an AWS account.
-
-    Args:
-        account_session (boto3.Session): Session for the AWS account.
-
-    Returns:
-        list: List of active AWS region names.
-    """
-    try:
-        ec2_client = account_session.client('ec2', region_name='us-east-1')  # Use us-east-1 as a common region
-        regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
-        return regions, None
-    except Exception as e:
-        return None, e
-
-def count_resources(input_type, management_access_key, management_secret_key):
-    """
-    Count AWS resources either at the organization or account level.
-
-    Args:
-        input_type (str): Resource counting type ('org' or 'account').
-        management_access_key (str): Access key for the management account.
-        management_secret_key (str): Secret key for the management account.
-
-    Returns:
-        None
-    """
-    # Create a session for the management account
-    management_session = boto3.Session(
-        aws_access_key_id=management_access_key,
-        aws_secret_access_key=management_secret_key
+def create_management_session(access_key: str, secret_key: str) -> boto3.Session:
+    """Create a boto3 session for the management/current account."""
+    return boto3.Session(
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
     )
 
-    # Get the management account ID
-    management_account_id = get_management_account_id(management_session)
 
-    if not management_account_id:
-        logging.error("Failed to retrieve the management account ID.")
-        exit()
+def get_account_id(session: boto3.Session) -> str:
+    sts = session.client("sts", config=boto_config)
+    return sts.get_caller_identity()["Account"]
 
-    # Create an org_client outside of the if block
-    org_client = management_session.client('organizations')
 
-    # Create a list to store the results
-    results = []
+def get_credentials_tuple(session: boto3.Session):
+    """Extract (access_key, secret_key, session_token) for passing to subprocesses."""
+    creds = session.get_credentials()
+    frozen = creds.get_frozen_credentials()
+    return frozen.access_key, frozen.secret_key, frozen.token
 
-    # Organization-level resource counting
-    if input_type == 'org':
-        # Gather resources for the management account using provided credentials
-        # Get the list of active regions for the management account
-        active_regions, regions_error = get_active_regions(management_session)
 
-        if regions_error:
-            logging.error(f"Error getting active regions for the management account: {regions_error}")
-            exit()
+def assume_role_into_account(account_id: str, mgmt_creds) -> Optional[boto3.Session]:
+    """
+    Assume OrganizationAccountAccessRole in a member account.
+    mgmt_creds = (access_key, secret_key, session_token) of management account.
+    """
+    access_key, secret_key, session_token = mgmt_creds
 
-        # Initialize counts to zero for the management account
-        total_running_ec2_instances = 0
-        total_lambda_function_count = 0
-        total_ecs_fargate_task_count = 0
-        total_eks_instance_count = 0
-        total_ecr_repository_count = 0
-        total_ecr_image_count = 0
-        total_eks_node_count = 0  # Initialize EKS node count
+    base_session = boto3.Session(
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        aws_session_token=session_token
+    )
 
-        # Iterate over active regions and count resources concurrently
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            resource_counts = list(executor.map(
-                count_resources_in_region,
-                [management_session] * len(active_regions),
-                active_regions
-            ))
+    sts = base_session.client("sts", config=boto_config)
+    role_arn = f"arn:aws:iam::{account_id}:role/{ASSUME_ROLE_NAME}"
 
-        # Aggregate resource counts from different regions
-        for counts in resource_counts:
-            total_running_ec2_instances += counts['running_ec2_instances']
-            total_lambda_function_count += counts['lambda_functions']
-            total_ecs_fargate_task_count += counts['ecs_fargate_tasks']
-            total_eks_instance_count += counts['eks_instances']
-            total_ecr_repository_count += counts['ecr_repositories']
-            total_ecr_image_count += counts['ecr_images']
-            total_eks_node_count += counts['eks_nodes']  # Add EKS node count
+    try:
+        resp = sts.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="OrgResourceScan"
+        )
+        c = resp["Credentials"]
+        return boto3.Session(
+            aws_access_key_id=c["AccessKeyId"],
+            aws_secret_access_key=c["SecretAccessKey"],
+            aws_session_token=c["SessionToken"],
+        )
+    except Exception as e:
+        logging.error(f"[{account_id}] AssumeRole failed: {e}")
+        return None
 
-        # Print the total counts for the management account
-        logging.info(f"  Management Account {management_account_id} Resource Counts:")
-        logging.info(f"  Total Running EC2 Instances: {total_running_ec2_instances}")
-        logging.info(f"  Total Lambda Functions: {total_lambda_function_count}")
-        logging.info(f"  Total ECS Fargate Tasks: {total_ecs_fargate_task_count}")
-        logging.info(f"  Total EKS Instances: {total_eks_instance_count}")
-        logging.info(f"  Total ECR Repositories: {total_ecr_repository_count}")
-        logging.info(f"  Total ECR Images: {total_ecr_image_count}")
-        logging.info(f"  Total EKS Nodes: {total_eks_node_count}\n")  # Log EKS node count
 
-        # Append the results to the list
-        results.append([
-            management_account_id,
-            total_running_ec2_instances,
-            total_lambda_function_count,
-            total_ecs_fargate_task_count,
-            total_eks_instance_count,
-            total_ecr_repository_count,
-            total_ecr_image_count,
-            total_eks_node_count  # Add EKS node count
+# =========================
+# Global Region List
+# =========================
+
+def get_global_region_list() -> List[str]:
+    """Get list of all enabled EC2 regions once (used by all workers)."""
+    ec2 = boto3.client("ec2", region_name="us-east-1", config=boto_config)
+    regions = ec2.describe_regions(AllRegions=False)["Regions"]
+    return [r["RegionName"] for r in regions]
+
+
+REGIONS = get_global_region_list()
+
+
+# =========================
+# Fast "Empty Account" Check
+# =========================
+
+def is_account_empty(session: boto3.Session) -> bool:
+    """
+    Quick check: does the account have *any* tagged resources?
+    Uses Resource Groups Tagging API with a single-page request.
+    If we can’t tell (AccessDenied, etc.), return False (assume non-empty).
+    """
+    try:
+        client = session.client(
+            "resource-groups-tagging-api",
+            region_name="us-east-1",
+            config=boto_config
+        )
+        resp = client.get_resources(ResourcesPerPage=1)
+        resources = resp.get("ResourceTagMappingList", [])
+        if not resources:
+            logging.info("Account appears empty (no tagged resources) – skipping full scan.")
+            return True
+        return False
+    except Exception as e:
+        logging.warning(f"Could not determine account emptiness (treating as non-empty): {e}")
+        return False
+
+
+# =========================
+# Per-Region Resource Counters
+# =========================
+
+def count_ec2_instances(session: boto3.Session, region: str) -> int:
+    """Count all EC2 instances (any state) in a region."""
+    try:
+        ec2 = session.client("ec2", region_name=region, config=boto_config)
+        paginator = ec2.get_paginator("describe_instances")
+
+        total = 0
+        for page in paginator.paginate():
+            for res in page.get("Reservations", []):
+                total += len(res.get("Instances", []))
+        return total
+    except Exception as e:
+        logging.error(f"[{region}] EC2 count failed: {e}")
+        return 0
+
+
+def count_lambda_functions(session: boto3.Session, region: str) -> int:
+    """Count Lambda functions in a region."""
+    try:
+        lam = session.client("lambda", region_name=region, config=boto_config)
+        paginator = lam.get_paginator("list_functions")
+
+        total = 0
+        for page in paginator.paginate():
+            total += len(page.get("Functions", []))
+        return total
+    except Exception as e:
+        logging.error(f"[{region}] Lambda count failed: {e}")
+        return 0
+
+
+def count_ecs_fargate_tasks(session: boto3.Session, region: str) -> int:
+    """
+    Count ECS Fargate tasks in a region.
+    Uses list_clusters + list_tasks(launchType='FARGATE').
+    """
+    try:
+        ecs = session.client("ecs", region_name=region, config=boto_config)
+        cluster_paginator = ecs.get_paginator("list_clusters")
+
+        total = 0
+        for c_page in cluster_paginator.paginate():
+            for cluster_arn in c_page.get("clusterArns", []):
+                task_paginator = ecs.get_paginator("list_tasks")
+                for t_page in task_paginator.paginate(cluster=cluster_arn, launchType="FARGATE"):
+                    total += len(t_page.get("taskArns", []))
+        return total
+    except Exception as e:
+        logging.error(f"[{region}] ECS Fargate task count failed: {e}")
+        return 0
+
+
+def count_eks_clusters(session: boto3.Session, region: str) -> int:
+    """Count EKS clusters in a region."""
+    try:
+        eks = session.client("eks", region_name=region, config=boto_config)
+        paginator = eks.get_paginator("list_clusters")
+
+        total = 0
+        for page in paginator.paginate():
+            total += len(page.get("clusters", []))
+        return total
+    except Exception as e:
+        logging.error(f"[{region}] EKS cluster count failed: {e}")
+        return 0
+
+
+def count_eks_nodes(session: boto3.Session, region: str) -> int:
+    """
+    Count unique EKS worker nodes (EC2 instances) in a region using Kubernetes tags:
+      kubernetes.io/cluster/<cluster-name> = owned/shared
+    """
+    try:
+        eks = session.client("eks", region_name=region, config=boto_config)
+        ec2 = session.client("ec2", region_name=region, config=boto_config)
+
+        nodes = set()
+
+        cluster_paginator = eks.get_paginator("list_clusters")
+        for c_page in cluster_paginator.paginate():
+            for cluster_name in c_page.get("clusters", []):
+                inst_paginator = ec2.get_paginator("describe_instances")
+                filters = [
+                    {
+                        "Name": f"tag:kubernetes.io/cluster/{cluster_name}",
+                        "Values": ["owned", "shared"]
+                    }
+                ]
+                for i_page in inst_paginator.paginate(Filters=filters):
+                    for res in i_page.get("Reservations", []):
+                        for inst in res.get("Instances", []):
+                            if inst.get("State", {}).get("Name") == "running":
+                                nodes.add(inst["InstanceId"])
+
+        return len(nodes)
+    except Exception as e:
+        logging.error(f"[{region}] EKS node count failed: {e}")
+        return 0
+
+
+def count_ecr_repositories(session: boto3.Session, region: str) -> int:
+    """Count ECR repositories in a region."""
+    try:
+        ecr = session.client("ecr", region_name=region, config=boto_config)
+        paginator = ecr.get_paginator("describe_repositories")
+
+        total = 0
+        for page in paginator.paginate():
+            total += len(page.get("repositories", []))
+        return total
+    except Exception as e:
+        logging.error(f"[{region}] ECR repo count failed: {e}")
+        return 0
+
+
+def count_ecr_images(session: boto3.Session, region: str) -> int:
+    """Count ECR images in all repositories in a region."""
+    try:
+        ecr = session.client("ecr", region_name=region, config=boto_config)
+        repo_paginator = ecr.get_paginator("describe_repositories")
+
+        total_images = 0
+        for r_page in repo_paginator.paginate():
+            for repo in r_page.get("repositories", []):
+                name = repo["repositoryName"]
+                img_paginator = ecr.get_paginator("describe_images")
+                for i_page in img_paginator.paginate(repositoryName=name):
+                    total_images += len(i_page.get("imageDetails", []))
+        return total_images
+    except Exception as e:
+        logging.error(f"[{region}] ECR image count failed: {e}")
+        return 0
+
+
+# =========================
+# Region Dispatcher (per Account)
+# =========================
+
+def count_resources_in_region(session: boto3.Session, region: str) -> Dict[str, int]:
+    """
+    Count all desired resources in a single region.
+    Uses threads to parallelize per-service calls inside the region.
+    """
+    with ThreadPoolExecutor(max_workers=MAX_REGION_WORKERS) as executor:
+        future_ec2 = executor.submit(count_ec2_instances, session, region)
+        future_lambda = executor.submit(count_lambda_functions, session, region)
+        future_ecs_fargate = executor.submit(count_ecs_fargate_tasks, session, region)
+        future_eks_clusters = executor.submit(count_eks_clusters, session, region)
+        future_eks_nodes = executor.submit(count_eks_nodes, session, region)
+        future_ecr_repos = executor.submit(count_ecr_repositories, session, region)
+        future_ecr_images = executor.submit(count_ecr_images, session, region)
+
+        return {
+            "ec2": future_ec2.result(),
+            "lambda": future_lambda.result(),
+            "ecs_fargate": future_ecs_fargate.result(),
+            "eks_clusters": future_eks_clusters.result(),
+            "eks_nodes": future_eks_nodes.result(),
+            "ecr_repos": future_ecr_repos.result(),
+            "ecr_images": future_ecr_images.result(),
+        }
+
+
+# =========================
+# Per-Account Aggregation
+# =========================
+
+def aggregate_account_resources(session: boto3.Session, account_id: str) -> Dict[str, Any]:
+    """
+    Scan all regions in an account (using threads per region) and aggregate totals.
+    """
+    totals = {
+        "AccountID": account_id,
+        "EC2": 0,
+        "Lambda": 0,
+        "ECS_Fargate": 0,
+        "EKS_Clusters": 0,
+        "EKS_Nodes": 0,
+        "ECR_Repos": 0,
+        "ECR_Images": 0,
+    }
+
+    for region in REGIONS:
+        counts = count_resources_in_region(session, region)
+        totals["EC2"] += counts["ec2"]
+        totals["Lambda"] += counts["lambda"]
+        totals["ECS_Fargate"] += counts["ecs_fargate"]
+        totals["EKS_Clusters"] += counts["eks_clusters"]
+        totals["EKS_Nodes"] += counts["eks_nodes"]
+        totals["ECR_Repos"] += counts["ecr_repos"]
+        totals["ECR_Images"] += counts["ecr_images"]
+
+    logging.info(
+        f"[{account_id}] EC2={totals['EC2']} "
+        f"Lambda={totals['Lambda']} ECS_Fargate={totals['ECS_Fargate']} "
+        f"EKS_Clusters={totals['EKS_Clusters']} EKS_Nodes={totals['EKS_Nodes']} "
+        f"ECR_Repos={totals['ECR_Repos']} ECR_Images={totals['ECR_Images']}"
+    )
+
+    return totals
+
+
+# =========================
+# Worker for ProcessPool (ORG Mode)
+# =========================
+
+def scan_member_account_worker(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Executed in a separate process for each member account.
+    Payload contains: { "account_id", "mgmt_creds" }
+    """
+    account_id = payload["account_id"]
+    mgmt_creds = payload["mgmt_creds"]
+
+    # Protect STS throttling slightly
+    time.sleep(random.uniform(0.05, 0.25))
+
+    session = assume_role_into_account(account_id, mgmt_creds)
+    if not session:
+        return None
+
+    # Skip empty accounts fast
+    if is_account_empty(session):
+        logging.info(f"[{account_id}] Skipped (empty account).")
+        return {
+            "AccountID": account_id,
+            "EC2": 0,
+            "Lambda": 0,
+            "ECS_Fargate": 0,
+            "EKS_Clusters": 0,
+            "EKS_Nodes": 0,
+            "ECR_Repos": 0,
+            "ECR_Images": 0,
+        }
+
+    return aggregate_account_resources(session, account_id)
+
+
+# =========================
+# CSV Helpers
+# =========================
+
+def init_csv(filename: str) -> None:
+    with open(filename, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "Account ID",
+            "EC2 Instances",
+            "Lambda Functions",
+            "ECS Fargate Tasks",
+            "EKS Clusters",
+            "EKS Nodes",
+            "ECR Repositories",
+            "ECR Images",
         ])
 
-        # Append the results to the CSV file immediately
-        with open(csv_file_name, 'a', newline='') as csv_file:
-            csv_writer = csv.writer(csv_file)
 
-            # Write the data rows to the CSV file
-            csv_writer.writerows(results)
+def append_account_to_csv(filename: str, row: Dict[str, Any]) -> None:
+    with open(filename, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            row["AccountID"],
+            row["EC2"],
+            row["Lambda"],
+            row["ECS_Fargate"],
+            row["EKS_Clusters"],
+            row["EKS_Nodes"],
+            row["ECR_Repos"],
+            row["ECR_Images"],
+        ])
 
-        # Clear results for the next member account
-        results.clear()
 
-        # Gather resources for member accounts
-        # List all member account IDs within the organization with progress bar
-        member_account_ids = []
+# =========================
+# ORG Mode
+# =========================
 
-        paginator = org_client.get_paginator('list_accounts')
-        for page in tqdm(paginator.paginate(), desc="Fetching Member Accounts"):
-            for account in page['Accounts']:
-                member_account_ids.append(account['Id'])
+def list_org_member_accounts(mgmt_session: boto3.Session) -> List[str]:
+    org = mgmt_session.client("organizations", config=boto_config)
+    account_ids: List[str] = []
+    paginator = org.get_paginator("list_accounts")
+    for page in paginator.paginate():
+        for acct in page.get("Accounts", []):
+            if acct.get("Status") == "ACTIVE":
+                account_ids.append(acct["Id"])
+    return account_ids
 
-        # Loop through each member account
-        for member_account_id in tqdm(member_account_ids, desc="Processing Member Accounts"):
-            # Create a new session for each member account by assuming the role
-            member_account_session, session_error = assume_role_and_get_session(
-                member_account_id,
-                'OrganizationAccountAccessRole',
-                'CountResources',
-                management_session
-            )
 
-            if session_error:
-                logging.error(f"Error creating session for account {member_account_id}: {session_error}")
-                continue
+def run_org_mode(mgmt_session: boto3.Session) -> None:
+    mgmt_account_id = get_account_id(mgmt_session)
+    logging.info(f"Management account: {mgmt_account_id}")
 
-            # Get the list of active regions for the member account
-            active_regions, regions_error = get_active_regions(member_account_session)
+    mgmt_creds = get_credentials_tuple(mgmt_session)
+    member_account_ids = list_org_member_accounts(mgmt_session)
+    logging.info(f"Found {len(member_account_ids)} ACTIVE member accounts.")
 
-            if regions_error:
-                logging.error(f"Error getting active regions for account {member_account_id}: {regions_error}")
-                continue
+    init_csv(CSV_FILE)
 
-            # Initialize counts to zero for each member account
-            total_running_ec2_instances = 0
-            total_lambda_function_count = 0
-            total_ecs_fargate_task_count = 0
-            total_eks_instance_count = 0
-            total_ecr_repository_count = 0
-            total_ecr_image_count = 0
-            total_eks_node_count = 0  # Initialize EKS node count
-
-            # Iterate over active regions and count resources concurrently
-            with ThreadPoolExecutor(max_workers=30) as executor:
-                resource_counts = list(executor.map(
-                    count_resources_in_region,
-                    [member_account_session] * len(active_regions),
-                    active_regions
-                ))
-
-            # Aggregate resource counts from different regions
-            for counts in resource_counts:
-                total_running_ec2_instances += counts['running_ec2_instances']
-                total_lambda_function_count += counts['lambda_functions']
-                total_ecs_fargate_task_count += counts['ecs_fargate_tasks']
-                total_eks_instance_count += counts['eks_instances']
-                total_ecr_repository_count += counts['ecr_repositories']
-                total_ecr_image_count += counts['ecr_images']
-                total_eks_node_count += counts['eks_nodes']  # Add EKS node count
-
-            # Print the total counts for all regions in the member account
-            logging.info(f"Member Account {member_account_id} Resource Counts:")
-            logging.info(f"  Total Running EC2 Instances: {total_running_ec2_instances}")
-            logging.info(f"  Total Lambda Functions: {total_lambda_function_count}")
-            logging.info(f"  Total ECS Fargate Tasks: {total_ecs_fargate_task_count}")
-            logging.info(f"  Total EKS Instances: {total_eks_instance_count}")
-            logging.info(f"  Total ECR Repositories: {total_ecr_repository_count}")
-            logging.info(f"  Total ECR Images: {total_ecr_image_count}")
-            logging.info(f"  Total EKS Nodes: {total_eks_node_count}\n")  # Log EKS node count
-
-            # Append the results to the list
-            results.append([
-                member_account_id,
-                total_running_ec2_instances,
-                total_lambda_function_count,
-                total_ecs_fargate_task_count,
-                total_eks_instance_count,
-                total_ecr_repository_count,
-                total_ecr_image_count,
-                total_eks_node_count  # Add EKS node count
-            ])
-
-            # Append the results to the CSV file immediately
-            with open(csv_file_name, 'a', newline='') as csv_file:
-                csv_writer = csv.writer(csv_file)
-
-                # Write the data rows to the CSV file
-                csv_writer.writerows(results)
-
-            # Clear results for the next member account
-            results.clear()
-
-        logging.info(f"Results added to {csv_file_name}")
-
-    # Account-level resource counting
+    # 1) Scan management account itself (synchronously, same as ACCOUNT mode)
+    logging.info(f"Scanning management account {mgmt_account_id}")
+    if is_account_empty(mgmt_session):
+        logging.info(f"[{mgmt_account_id}] Skipped (empty management account).")
+        mgmt_totals = {
+            "AccountID": mgmt_account_id,
+            "EC2": 0,
+            "Lambda": 0,
+            "ECS_Fargate": 0,
+            "EKS_Clusters": 0,
+            "EKS_Nodes": 0,
+            "ECR_Repos": 0,
+            "ECR_Images": 0,
+        }
     else:
-        # Get the account ID associated with the provided access keys
-        sts_client = management_session.client('sts')
+        mgmt_totals = aggregate_account_resources(mgmt_session, mgmt_account_id)
 
-        try:
-            response = sts_client.get_caller_identity()
-            account_id = response['Account']
-        except Exception as e:
-            logging.error(f"Error getting account ID: {e}")
-            exit()
+    append_account_to_csv(CSV_FILE, mgmt_totals)
 
-        # Get the list of active regions for the account
-        active_regions, regions_error = get_active_regions(management_session)
+    # 2) Scan member accounts in parallel (ProcessPool)
+    tasks = []
+    for acc_id in member_account_ids:
+        tasks.append({"account_id": acc_id, "mgmt_creds": mgmt_creds})
 
-        if regions_error:
-            logging.error(f"Error getting active regions for the account: {regions_error}")
-            exit()
+    logging.info("Starting parallel scan of member accounts...")
 
-        # Initialize counts to zero for the account
-        total_running_ec2_instances = 0
-        total_lambda_function_count = 0
-        total_ecs_fargate_task_count = 0
-        total_eks_instance_count = 0
-        total_ecr_repository_count = 0
-        total_ecr_image_count = 0
-        total_eks_node_count = 0  # Initialize EKS node count
+    with ProcessPoolExecutor(max_workers=MAX_ACCOUNT_WORKERS) as executor:
+        future_to_account = {
+            executor.submit(scan_member_account_worker, payload): payload["account_id"]
+            for payload in tasks
+        }
 
-        # Iterate over active regions and count resources concurrently
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            resource_counts = list(executor.map(
-                count_resources_in_region,
-                [management_session] * len(active_regions),
-                active_regions
-            ))
+        for future in tqdm(as_completed(future_to_account), total=len(future_to_account), desc="Member accounts"):
+            account_id = future_to_account[future]
+            try:
+                result = future.result()
+                if result:
+                    append_account_to_csv(CSV_FILE, result)
+            except Exception as e:
+                logging.error(f"[{account_id}] Error in worker: {e}")
 
-        # Aggregate resource counts from different regions
-        for counts in resource_counts:
-            total_running_ec2_instances += counts['running_ec2_instances']
-            total_lambda_function_count += counts['lambda_functions']
-            total_ecs_fargate_task_count += counts['ecs_fargate_tasks']
-            total_eks_instance_count += counts['eks_instances']
-            total_ecr_repository_count += counts['ecr_repositories']
-            total_ecr_image_count += counts['ecr_images']
-            total_eks_node_count += counts['eks_nodes']  # Add EKS node count
+    logging.info(f"ORG mode scan complete. Results in {CSV_FILE}")
 
-        # Print the total counts for all regions in the account
-        logging.info(f"Account {account_id} Resource Counts:")
-        logging.info(f"  Total Running EC2 Instances: {total_running_ec2_instances}")
-        logging.info(f"  Total Lambda Functions: {total_lambda_function_count}")
-        logging.info(f"  Total ECS Fargate Tasks: {total_ecs_fargate_task_count}")
-        logging.info(f"  Total EKS Instances: {total_eks_instance_count}")
-        logging.info(f"  Total ECR Repositories: {total_ecr_repository_count}")
-        logging.info(f"  Total ECR Images: {total_ecr_image_count}")
-        logging.info(f"  Total EKS Nodes: {total_eks_node_count}")  # Log EKS node count
 
-        # Append the results to the CSV file
-        with open(csv_file_name, 'a', newline='') as csv_file:
-            csv_writer = csv.writer(csv_file)
+# =========================
+# ACCOUNT Mode
+# =========================
 
-            # Write the data rows to the CSV file
-            csv_writer.writerow([
-                account_id,
-                total_running_ec2_instances,
-                total_lambda_function_count,
-                total_ecs_fargate_task_count,
-                total_eks_instance_count,
-                total_ecr_repository_count,
-                total_ecr_image_count,
-                total_eks_node_count  # Add EKS node count
-            ])
+def run_account_mode(mgmt_session: boto3.Session) -> None:
+    account_id = get_account_id(mgmt_session)
+    logging.info(f"Running ACCOUNT mode for account {account_id}")
 
-        logging.info(f"Results added to {csv_file_name}")
+    init_csv(CSV_FILE)
+
+    if is_account_empty(mgmt_session):
+        logging.info(f"[{account_id}] Skipped (empty account).")
+        totals = {
+            "AccountID": account_id,
+            "EC2": 0,
+            "Lambda": 0,
+            "ECS_Fargate": 0,
+            "EKS_Clusters": 0,
+            "EKS_Nodes": 0,
+            "ECR_Repos": 0,
+            "ECR_Images": 0,
+        }
+    else:
+        totals = aggregate_account_resources(mgmt_session, account_id)
+
+    append_account_to_csv(CSV_FILE, totals)
+    logging.info(f"ACCOUNT mode scan complete. Results in {CSV_FILE}")
+
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+    print("Enter 'org' for organization-level resource counting")
+    print("Enter 'account' for single-account resource counting")
+    input_type = input("Your choice (org/account): ").strip().lower()
+
+    if input_type not in ("org", "account"):
+        print("Invalid input. Please enter 'org' or 'account'.")
+        logging.error("Invalid mode selected.")
+        return
+
+    access_key = input("Enter the access key for the management/current account: ").strip()
+    secret_key = input("Enter the secret key for the management/current account: ").strip()
+
+    mgmt_session = create_management_session(access_key, secret_key)
+
+    if input_type == "org":
+        run_org_mode(mgmt_session)
+    else:
+        run_account_mode(mgmt_session)
+
+    print(f"Done. Results written to {CSV_FILE}")
+    print(f"Logs written to {LOG_FILE}")
+
 
 if __name__ == "__main__":
-    # Input type: 'org' for organization-level resource counting or 'account' for account-level counting
-    input_type = input("Enter 'org' for organization-level resource counting or 'account' for account-level counting: ")
-
-    if input_type not in ('org', 'account'):
-        logging.error("Invalid input. Please enter 'org' or 'account'.")
-        exit()
-
-    # Management account access key and secret key
-    management_access_key = input("Enter the access key for the account: ")
-    management_secret_key = input("Enter the secret key for the account: ")
-
-    # Initialize the CSV file with headers
-    with open(csv_file_name, 'w', newline='') as csv_file:
-        csv_writer = csv.writer(csv_file)
-
-        # Write the header row to the CSV file
-        csv_writer.writerow([
-            'Account ID',
-            'Running EC2 Instances',
-            'Lambda Functions',
-            'ECS Fargate Tasks',
-            'EKS Instances',
-            'ECR Repositories',
-            'ECR Images',
-            'EKS Nodes'  # Add EKS node count
-        ])
-
-    # Count AWS resources based on the input type
-    count_resources(input_type, management_access_key, management_secret_key)
+    main()
