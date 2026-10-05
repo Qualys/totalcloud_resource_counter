@@ -1,9 +1,4 @@
 # TotalCloud Resource Counter Scripts
 
-* Please refer to the individual folders for instructions on running these scripts for each cloud provider/usage.
+## NOTE: Deprecated This is the older version, please refer to https://github.com/Qualys/TotalCloud/tree/main/qlu-resource-discovery-tools"
 
-## Cloud Providers:
-
-* [AWS](/aws) 
-* [Azure](/azure)
-* [GCP](/gcp)
